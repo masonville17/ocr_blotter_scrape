@@ -1,0 +1,8 @@
+result.txt
+ocr_output
+*.png
+*/*.png
+./result.txt
+ocr_output/*
+tmp/*
+.tmp
