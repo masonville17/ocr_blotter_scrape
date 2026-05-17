@@ -109,10 +109,15 @@ BLOTTER_WORKDIR=/path/to/output       # where result.txt and tmp/ are written
 BLOTTER_RESULT_FILE=/path/result.txt  # exact text output path
 BLOTTER_REPO_DIR=/path/to/repo        # needed if scripts are copied elsewhere
 BLOTTER_REQUEST_LIMIT=3               # default download count
+BLOTTER_COUNTY_GENERATE_DAYS=30       # fallback county URL search window
 BLOTTER_NO_LESS=1                     # print directly instead of opening less
 BLOTTER_PDF_DPI=200                   # render DPI for OCR page images
 BLOTTER_TESSERACT_LANG=eng            # OCR language
 ```
+
+The county script visits the Mesa County parent page before requesting the
+blotter app, sends browser-like headers, and falls back to generated PDF URLs if
+the listing page does not respond.
 
 ## Notes
 
