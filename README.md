@@ -17,8 +17,9 @@ To use it for a different city or county:
 
 **Tip:** If your locality uses a different report format, you may need to adjust the parsing logic in the scripts. Most agencies with similar PDF layouts will work with minimal changes.
 
-If you improve support for another locality, consider contributing your changes!
+**Tip:** The default county service is geofenced and is not available when using a VPN.
 
+If you improve support for another locality, consider contributing your changes!
 
 ## Requirements
 
