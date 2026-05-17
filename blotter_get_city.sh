@@ -1,77 +1,132 @@
-#!/bin/bash
-# gets grand junction city blotter reports, ocrs them and cat-pipes textfile to less
+#!/usr/bin/env bash
+set -euo pipefail
 
-pdf_cwd="/home/$USER/ocr_blotter_scrape"
-pdf_tmp="$pdf_cwd/tmp"
-mkdir_result=$(mkdir -p "$pdf_tmp")
-result_file="result.txt"
-cd "$pdf_cwd"
-echo "" > "$pdf_cwd/result.txt"
-rm_pdfs=$(rm -rf *PDF* && rm -rf ./tmp/*.pdf)
+# Gets Grand Junction city blotter reports, OCRs them, and prints extracted text.
 
-# Base URL of the website
-base_url="https://www.gjcity.org"
+script_path="$(realpath "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s\n' "${BASH_SOURCE[0]}")"
+script_dir="$(cd -- "$(dirname -- "$script_path")" && pwd -P)"
 
-# URL of the police blotter page
-blotter_page="$base_url/877/Police-Blotter"
-
-# Temporary file to store the HTML content
-temp_file=$(mktemp)
-
-# Fetch the webpage
-wget -q -O "$temp_file" "$blotter_page"
-
-# Maximum number of files to download (default: unrequest_limited)
-request_limit=3
-# request_counter to track the number of downloads
-request_counter=0
-
-# Extract links to the PDFs
-grep -oP '(?<=<a target="_blank" href=")/DocumentCenter/View/\d+/[^"]+' "$temp_file" |
-while read -r requested_path; do
-    # Check if we've reached the request_limit
-    if [[ $request_limit -gt 0 && $request_counter -ge $request_limit ]]; then
-        echo "Download request_limit of $request_limit reached. Exiting."
-        break
+find_repo_dir() {
+  local candidate
+  for candidate in "${BLOTTER_REPO_DIR:-}" "$script_dir" "$PWD" "$HOME/ocr_blotter_scrape"; do
+    if [[ -n "$candidate" && -f "$candidate/pdf2text.sh" ]]; then
+      cd "$candidate" && pwd -P
+      return
     fi
+  done
 
-    # Construct the full URL
-    interpolated_url="${base_url}${requested_path}"
+  echo "Could not locate pdf2text.sh. Run from the repo or set BLOTTER_REPO_DIR." >&2
+  exit 72
+}
 
-    # Extract the pdf_filename from the URL
-    pdf_filename=$(basename "$requested_path")
-
-    # Download the PDF if it doesn't already exist
-    if [[ ! -f "$pdf_filename" ]]; then
-        echo "Downloading $interpolated_url..."
-        curl -L -o "$pdf_filename" "$interpolated_url"
-        
-        # Verify the file is not empty
-        if [[ ! -s "$pdf_filename" ]]; then
-            echo "Error downloading $interpolated_url. File is empty."
-            rm "$pdf_filename"
-        else
-            # Increment the request_counter for successful downloads
-            request_counter=$((request_counter + 1))
-        fi
-    else
-        echo "$pdf_filename already exists, skipping."
+require_cmds() {
+  local cmd
+  for cmd in curl grep sed awk sort head basename mktemp; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+      echo "Missing required command: $cmd" >&2
+      exit 127
     fi
-done
+  done
+}
 
-# Cleanup
-rm "$temp_file"
-for file in *PDF*; do
-  if [[ -f "$file" ]]; then
-    mv "$file" "${file// /_}.pdf"
+normalize_url() {
+  local href="$1"
+  case "$href" in
+    http://*|https://*) printf '%s\n' "$href" ;;
+    //*) printf 'https:%s\n' "$href" ;;
+    /*) printf '%s%s\n' "$base_url" "$href" ;;
+    *) printf '%s/%s\n' "$base_url" "$href" ;;
+  esac
+}
+
+safe_pdf_name() {
+  local url_path file_name
+  url_path="${1%%\?*}"
+  file_name="$(basename "$url_path")"
+  file_name="${file_name//%20/_}"
+  file_name="$(printf '%s' "$file_name" | sed -E 's/[^A-Za-z0-9._-]+/_/g; s/_+/_/g; s/^_//; s/_$//')"
+  case "$file_name" in
+    *.[Pp][Dd][Ff]) ;;
+    *) file_name="$file_name.pdf" ;;
+  esac
+  printf '%s\n' "$file_name"
+}
+
+print_result() {
+  if [[ -t 1 && "${BLOTTER_NO_LESS:-0}" != "1" ]] && command -v less >/dev/null 2>&1; then
+    less "$result_file"
+  else
+    cat "$result_file"
   fi
+}
+
+require_cmds
+
+repo_dir="$(find_repo_dir)"
+work_dir="${BLOTTER_WORKDIR:-$repo_dir}"
+tmp_dir="$work_dir/tmp"
+pdf_dir="$tmp_dir/pdfs/city"
+ocr_dir="$tmp_dir/ocr/city"
+result_file="${BLOTTER_RESULT_FILE:-$work_dir/result.txt}"
+request_limit="${1:-${BLOTTER_REQUEST_LIMIT:-3}}"
+
+if ! [[ "$request_limit" =~ ^[0-9]+$ ]]; then
+  echo "Request limit must be a non-negative integer: $request_limit" >&2
+  exit 64
+fi
+
+base_url="https://www.gjcity.org"
+blotter_page="$base_url/877/Police-Blotter"
+temp_file="$(mktemp)"
+trap 'rm -f "$temp_file"' EXIT
+
+mkdir -p "$pdf_dir" "$ocr_dir"
+rm -rf "$pdf_dir" "$ocr_dir"
+mkdir -p "$pdf_dir" "$ocr_dir" "$(dirname "$result_file")"
+: > "$result_file"
+
+curl --fail --location --silent --show-error \
+  --connect-timeout "${BLOTTER_CONNECT_TIMEOUT:-15}" \
+  --max-time "${BLOTTER_MAX_TIME:-90}" \
+  --retry "${BLOTTER_RETRIES:-2}" \
+  --user-agent "ocr_blotter_scrape/1.0" \
+  --output "$temp_file" \
+  "$blotter_page"
+
+mapfile -t pdf_urls < <(
+  grep -Eo 'href="[^"]+"' "$temp_file" |
+    sed -E 's/^href="//; s/"$//; s/&amp;/\&/g' |
+    grep -E '/DocumentCenter/View/[0-9]+/[^"]*(Police[-_]?Blotter|Blotter|PDF)' |
+    while IFS= read -r href; do normalize_url "$href"; done |
+    awk '!seen[$0]++' |
+    { if (( request_limit > 0 )); then head -n "$request_limit"; else cat; fi; }
+)
+
+if [[ ${#pdf_urls[@]} -eq 0 ]]; then
+  echo "No city blotter PDFs found at $blotter_page" >&2
+  exit 69
+fi
+
+for pdf_url in "${pdf_urls[@]}"; do
+  pdf_file="$pdf_dir/$(safe_pdf_name "$pdf_url")"
+  echo "Downloading $pdf_url..." >&2
+  curl --fail --location --silent --show-error \
+    --connect-timeout "${BLOTTER_CONNECT_TIMEOUT:-15}" \
+    --max-time "${BLOTTER_MAX_TIME:-90}" \
+    --retry "${BLOTTER_RETRIES:-2}" \
+    --user-agent "ocr_blotter_scrape/1.0" \
+    --output "$pdf_file" \
+    "$pdf_url"
+
+  if [[ ! -s "$pdf_file" ]]; then
+    echo "Downloaded file is empty: $pdf_url" >&2
+    rm -f "$pdf_file"
+    continue
+  fi
+
+  bash "$repo_dir/pdf2text.sh" "$pdf_file" "$ocr_dir" >> "$result_file"
+  printf '\n' >> "$result_file"
 done
-mv_pdfs=$(mv ./*.pdf ./tmp)
-for pdf in ./tmp/*.pdf; do
-	echo "$(./pdf2text.sh $pdf)" >> "$pdf_cwd/result.txt"
-done
-grep '.\{14,\}' "$pdf_cwd/result.txt" > "$pdf_cwd/result.txt.tmp" && mv "$pdf_cwd/result.txt.tmp" "$pdf_cwd/result.txt"
 
-cat "$pdf_cwd/result.txt" | less
-
-
+awk 'length($0) >= 14' "$result_file" > "$result_file.tmp" && mv "$result_file.tmp" "$result_file"
+print_result
